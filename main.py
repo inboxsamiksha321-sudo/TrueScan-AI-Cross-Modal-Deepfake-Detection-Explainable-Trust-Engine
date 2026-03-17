@@ -1,4 +1,5 @@
 from fastapi import FastAPI, File, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 from PIL.ExifTags import TAGS
 from transformers import pipeline
@@ -9,7 +10,16 @@ import base64
 
 app = FastAPI()
 
-# 🔥 Load model once
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Load model once
 classifier = pipeline("image-classification", model="umm-maybe/AI-image-detector")
 
 
@@ -19,7 +29,6 @@ classifier = pipeline("image-classification", model="umm-maybe/AI-image-detector
 def get_metadata(image):
     try:
         exif_data = image._getexif()
-
         if not exif_data:
             return None
 
@@ -29,7 +38,6 @@ def get_metadata(image):
             metadata[decoded] = value
 
         return metadata
-
     except:
         return None
 
@@ -37,7 +45,7 @@ def get_metadata(image):
 # -------------------------------
 # NOISE FUNCTION
 # -------------------------------
-def noise_score(image):
+def get_noise_variance(image):
     gray = np.array(image.convert("L"))
     return np.var(gray)
 
@@ -45,47 +53,61 @@ def noise_score(image):
 # -------------------------------
 # EDGE FUNCTION
 # -------------------------------
-def edge_score(image):
+def get_edge_score(image):
     img = np.array(image)
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     edges = cv2.Canny(gray, 100, 200)
     return np.mean(edges)
 
 
+# -------------------------------
+# HEATMAP FUNCTION
+# -------------------------------
 def generate_heatmap(image):
     img = np.array(image)
-
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     edges = cv2.Canny(gray, 100, 200)
 
     heatmap = cv2.applyColorMap(edges, cv2.COLORMAP_JET)
+    overlay = cv2.addWeighted(img, 0.6, heatmap, 0.4, 0)
 
-    return heatmap
+    # Resize for frontend performance
+    overlay = cv2.resize(overlay, (300, 300))
+
+    return overlay
 
 
 @app.get("/")
 def home():
-    return {"message": "Backend running 🚀"}
+    return {"message": "AI Image Detection Backend Running "}
 
 
-@app.post("/upload/")
-async def upload_image(file: UploadFile = File(...)):
+@app.post("/detect/")
+async def detect_image(file: UploadFile = File(...)):
     contents = await file.read()
-
-    image = Image.open(io.BytesIO(contents)).convert("RGB")
+    try:
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+    except:
+        return {"error": "Invalid image file"}
 
     # -------------------------------
     # MODEL PREDICTION
     # -------------------------------
     result = classifier(image)
 
+    if not result:
+        return {"error": "Model failed to process image"}
+
     human_score = 0
     ai_score = 0
 
     for r in result:
-        if r["label"] == "human":
+        label = r["label"].lower()
+
+        if any(x in label for x in ["real", "human"]):
             human_score = r["score"]
-        elif r["label"] == "artificial":
+
+        elif any(x in label for x in ["fake", "ai", "generated", "artificial"]):
             ai_score = r["score"]
 
     # -------------------------------
@@ -94,7 +116,7 @@ async def upload_image(file: UploadFile = File(...)):
     metadata = get_metadata(image)
 
     if metadata is None:
-        metadata_flag = "MISSING ⚠️"
+        metadata_flag = "MISSING"
         metadata_score = 1
     else:
         metadata_flag = "PRESENT"
@@ -103,10 +125,10 @@ async def upload_image(file: UploadFile = File(...)):
     # -------------------------------
     # NOISE
     # -------------------------------
-    noise = noise_score(image)
+    noise_value = get_noise_variance(image)
 
-    if noise < 500:
-        noise_flag = "LOW NOISE (AI-like) ⚠️"
+    if noise_value < 500:
+        noise_flag = "LOW NOISE (AI-like)"
         noise_score_flag = 1
     else:
         noise_flag = "NORMAL NOISE"
@@ -115,66 +137,78 @@ async def upload_image(file: UploadFile = File(...)):
     # -------------------------------
     # EDGES
     # -------------------------------
-    edges = edge_score(image)
+    edge_value = get_edge_score(image)
 
-    if edges < 5:
-        edge_flag = "TOO SMOOTH (AI-like) ⚠️"
+    if edge_value < 5:
+        edge_flag = "TOO SMOOTH (AI-like)"
         edge_score_flag = 1
     else:
         edge_flag = "NORMAL EDGES"
         edge_score_flag = 0
 
+    # -------------------------------
+    # HEATMAP
+    # -------------------------------
     heatmap = generate_heatmap(image)
-
     _, buffer = cv2.imencode(".jpg", heatmap)
     heatmap_base64 = base64.b64encode(buffer).decode("utf-8")
 
     # -------------------------------
-    # FINAL DECISION ENGINE 🔥
+    # DECISION ENGINE
     # -------------------------------
     ai_votes = 0
     reasons = []
 
-    # Model (strong weight)
     if ai_score > 0.6:
         ai_votes += 2
-        reasons.append("Model detects artificial patterns")
+        reasons.append("Model detects artificial visual patterns")
 
-    # Metadata
     if metadata_score == 1:
         ai_votes += 1
-        reasons.append("Metadata missing")
+        reasons.append("Missing camera metadata (EXIF)")
 
-    # Noise
     if noise_score_flag == 1:
         ai_votes += 1
-        reasons.append("Low noise detected (AI-like)")
+        reasons.append("Lack of natural sensor noise")
 
-    # Edges
     if edge_score_flag == 1:
         ai_votes += 1
-        reasons.append("Image too smooth (low edge detail)")
+        reasons.append("Unnaturally smooth textures")
 
     # Final decision
     if ai_votes >= 3:
-        final_prediction = "AI GENERATED"
+        prediction = "AI GENERATED (High Confidence)"
         risk = "HIGH"
     elif ai_votes == 2:
-        final_prediction = "UNCERTAIN ⚠️"
+        prediction = "UNCERTAIN (Moderate Confidence)"
         risk = "MEDIUM"
     else:
-        final_prediction = "LIKELY REAL"
+        prediction = "LIKELY REAL (High Confidence)"
         risk = "LOW"
 
-    confidence = round(max(human_score, ai_score), 2)
+    # -------------------------------
+    # SMART SCORING
+    # -------------------------------
+    ai_likelihood = round(
+        (ai_score * 0.6)
+        + (metadata_score * 0.1)
+        + (noise_score_flag * 0.15)
+        + (edge_score_flag * 0.15),
+        2,
+    )
+
+    ai_probability = round(ai_score * 100, 2)
+    real_probability = round(human_score * 100, 2)
 
     # -------------------------------
-    # FINAL RESPONSE ✅
+    # FINAL RESPONSE
     # -------------------------------
     return {
-        "prediction": final_prediction,
-        "confidence": confidence,
+        "prediction": prediction,
         "risk_level": risk,
+        "ai_likelihood": ai_likelihood,
+        "ai_probability": ai_probability,
+        "real_probability": real_probability,
         "signals": {
             "model_ai_score": round(ai_score, 2),
             "metadata": metadata_flag,
@@ -182,6 +216,6 @@ async def upload_image(file: UploadFile = File(...)):
             "edges": edge_flag,
         },
         "explanation": reasons,
-        "raw_model_output": result,
         "heatmap": heatmap_base64,
+        "raw_model_output": result,
     }
