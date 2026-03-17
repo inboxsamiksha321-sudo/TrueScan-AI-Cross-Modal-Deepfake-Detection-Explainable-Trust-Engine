@@ -1,10 +1,11 @@
 from fastapi import FastAPI, File, UploadFile
 from PIL import Image
 from PIL.ExifTags import TAGS
+from transformers import pipeline
 import io
 import numpy as np
 import cv2
-from transformers import pipeline
+import base64
 
 app = FastAPI()
 
@@ -49,6 +50,17 @@ def edge_score(image):
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     edges = cv2.Canny(gray, 100, 200)
     return np.mean(edges)
+
+
+def generate_heatmap(image):
+    img = np.array(image)
+
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, 100, 200)
+
+    heatmap = cv2.applyColorMap(edges, cv2.COLORMAP_JET)
+
+    return heatmap
 
 
 @app.get("/")
@@ -112,6 +124,11 @@ async def upload_image(file: UploadFile = File(...)):
         edge_flag = "NORMAL EDGES"
         edge_score_flag = 0
 
+    heatmap = generate_heatmap(image)
+
+    _, buffer = cv2.imencode(".jpg", heatmap)
+    heatmap_base64 = base64.b64encode(buffer).decode("utf-8")
+
     # -------------------------------
     # FINAL DECISION ENGINE 🔥
     # -------------------------------
@@ -166,4 +183,5 @@ async def upload_image(file: UploadFile = File(...)):
         },
         "explanation": reasons,
         "raw_model_output": result,
+        "heatmap": heatmap_base64,
     }
