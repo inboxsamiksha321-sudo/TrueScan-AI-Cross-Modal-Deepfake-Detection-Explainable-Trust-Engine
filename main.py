@@ -3,6 +3,7 @@ from PIL import Image
 from PIL.ExifTags import TAGS
 import io
 import numpy as np
+import cv2
 
 app = FastAPI()
 
@@ -36,6 +37,21 @@ def noise_score(image):
     return variance
 
 
+def edge_score(image):
+    img = np.array(image)
+
+    # Convert to grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+
+    # Detect edges
+    edges = cv2.Canny(gray, 100, 200)
+
+    # Average edge intensity
+    score = np.mean(edges)
+
+    return score
+
+
 @app.get("/")
 def home():
     return {"message": "Backend running 🚀"}
@@ -67,6 +83,15 @@ async def upload_image(file: UploadFile = File(...)):
         noise_flag = "NORMAL NOISE"
         noise_score_flag = 0
 
+    edges = edge_score(image)
+
+    if edges < 5:
+        edge_flag = "TOO SMOOTH (AI-like) ⚠️"
+        edge_score_flag = 1
+    else:
+        edge_flag = "NORMAL EDGES"
+        edge_score_flag = 0
+
     return {
         "filename": file.filename,
         "metadata_flag": metadata_flag,
@@ -74,4 +99,7 @@ async def upload_image(file: UploadFile = File(...)):
         "noise_value": float(noise),
         "noise_flag": noise_flag,
         "noise_score": noise_score_flag,
+        "edge_value": float(edges),
+        "edge_flag": edge_flag,
+        "edge_score": edge_score_flag,
     }
