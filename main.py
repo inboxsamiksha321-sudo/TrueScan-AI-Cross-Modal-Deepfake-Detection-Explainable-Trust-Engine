@@ -4,11 +4,17 @@ from PIL.ExifTags import TAGS
 import io
 import numpy as np
 import cv2
+from transformers import pipeline
 
 app = FastAPI()
 
+# 🔥 Load model once
+classifier = pipeline("image-classification", model="umm-maybe/AI-image-detector")
 
-# 🔍 Function to extract metadata
+
+# -------------------------------
+# METADATA FUNCTION
+# -------------------------------
 def get_metadata(image):
     try:
         exif_data = image._getexif()
@@ -27,29 +33,22 @@ def get_metadata(image):
         return None
 
 
+# -------------------------------
+# NOISE FUNCTION
+# -------------------------------
 def noise_score(image):
-    # Convert to grayscale
     gray = np.array(image.convert("L"))
-
-    # Calculate variance (measure of noise)
-    variance = np.var(gray)
-
-    return variance
+    return np.var(gray)
 
 
+# -------------------------------
+# EDGE FUNCTION
+# -------------------------------
 def edge_score(image):
     img = np.array(image)
-
-    # Convert to grayscale
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-
-    # Detect edges
     edges = cv2.Canny(gray, 100, 200)
-
-    # Average edge intensity
-    score = np.mean(edges)
-
-    return score
+    return np.mean(edges)
 
 
 @app.get("/")
@@ -61,19 +60,37 @@ def home():
 async def upload_image(file: UploadFile = File(...)):
     contents = await file.read()
 
-    # Convert to image
-    image = Image.open(io.BytesIO(contents))
+    image = Image.open(io.BytesIO(contents)).convert("RGB")
 
-    # 🔍 Metadata check
+    # -------------------------------
+    # MODEL PREDICTION
+    # -------------------------------
+    result = classifier(image)
+
+    human_score = 0
+    ai_score = 0
+
+    for r in result:
+        if r["label"] == "human":
+            human_score = r["score"]
+        elif r["label"] == "artificial":
+            ai_score = r["score"]
+
+    # -------------------------------
+    # METADATA
+    # -------------------------------
     metadata = get_metadata(image)
 
     if metadata is None:
         metadata_flag = "MISSING ⚠️"
-        metadata_score = 1  # suspicious
+        metadata_score = 1
     else:
         metadata_flag = "PRESENT"
-        metadata_score = 0  # normal
+        metadata_score = 0
 
+    # -------------------------------
+    # NOISE
+    # -------------------------------
     noise = noise_score(image)
 
     if noise < 500:
@@ -83,6 +100,9 @@ async def upload_image(file: UploadFile = File(...)):
         noise_flag = "NORMAL NOISE"
         noise_score_flag = 0
 
+    # -------------------------------
+    # EDGES
+    # -------------------------------
     edges = edge_score(image)
 
     if edges < 5:
@@ -92,14 +112,58 @@ async def upload_image(file: UploadFile = File(...)):
         edge_flag = "NORMAL EDGES"
         edge_score_flag = 0
 
+    # -------------------------------
+    # FINAL DECISION ENGINE 🔥
+    # -------------------------------
+    ai_votes = 0
+    reasons = []
+
+    # Model (strong weight)
+    if ai_score > 0.6:
+        ai_votes += 2
+        reasons.append("Model detects artificial patterns")
+
+    # Metadata
+    if metadata_score == 1:
+        ai_votes += 1
+        reasons.append("Metadata missing")
+
+    # Noise
+    if noise_score_flag == 1:
+        ai_votes += 1
+        reasons.append("Low noise detected (AI-like)")
+
+    # Edges
+    if edge_score_flag == 1:
+        ai_votes += 1
+        reasons.append("Image too smooth (low edge detail)")
+
+    # Final decision
+    if ai_votes >= 3:
+        final_prediction = "AI GENERATED"
+        risk = "HIGH"
+    elif ai_votes == 2:
+        final_prediction = "UNCERTAIN ⚠️"
+        risk = "MEDIUM"
+    else:
+        final_prediction = "LIKELY REAL"
+        risk = "LOW"
+
+    confidence = round(max(human_score, ai_score), 2)
+
+    # -------------------------------
+    # FINAL RESPONSE ✅
+    # -------------------------------
     return {
-        "filename": file.filename,
-        "metadata_flag": metadata_flag,
-        "metadata_score": metadata_score,
-        "noise_value": float(noise),
-        "noise_flag": noise_flag,
-        "noise_score": noise_score_flag,
-        "edge_value": float(edges),
-        "edge_flag": edge_flag,
-        "edge_score": edge_score_flag,
+        "prediction": final_prediction,
+        "confidence": confidence,
+        "risk_level": risk,
+        "signals": {
+            "model_ai_score": round(ai_score, 2),
+            "metadata": metadata_flag,
+            "noise": noise_flag,
+            "edges": edge_flag,
+        },
+        "explanation": reasons,
+        "raw_model_output": result,
     }
